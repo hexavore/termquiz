@@ -4,7 +4,6 @@ pub struct AppLayout {
     pub titlebar: Rect,
     pub sidebar: Rect,
     pub main: Rect,
-    pub statusbar: Rect,
     pub keybar: Rect,
 }
 
@@ -14,7 +13,6 @@ pub fn compute_layout(area: Rect) -> AppLayout {
         .constraints([
             Constraint::Length(1),  // titlebar
             Constraint::Min(5),    // middle (sidebar + main)
-            Constraint::Length(1), // statusbar
             Constraint::Length(1), // keybar
         ])
         .split(area);
@@ -31,7 +29,6 @@ pub fn compute_layout(area: Rect) -> AppLayout {
         titlebar: vertical[0],
         sidebar: middle[0],
         main: middle[1],
-        statusbar: vertical[2],
-        keybar: vertical[3],
+        keybar: vertical[2],
     }
 }

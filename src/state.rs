@@ -21,7 +21,7 @@ pub enum Dialog {
     ConfirmSubmit,
     ConfirmQuit,
     ConfirmHint,
-    ConfirmDeleteFile(usize),
+    DoneRequiresAnswer,
     TwoMinuteWarning,
     Help,
 }
@@ -80,6 +80,7 @@ pub struct AppState {
     pub file_cursor: usize,
     pub active_panel: ActivePanel,
     pub dragging_scrollbar: bool,
+    pub done_marks: HashMap<u32, bool>,
 }
 
 impl AppState {
@@ -115,6 +116,7 @@ impl AppState {
             file_cursor: 0,
             active_panel: ActivePanel::Main,
             dragging_scrollbar: false,
+            done_marks: HashMap::new(),
         }
     }
 
@@ -129,21 +131,19 @@ impl AppState {
     }
 
     pub fn question_status(&self, qnum: u32) -> QuestionStatus {
+        if self.done_marks.get(&qnum).copied().unwrap_or(false) {
+            return QuestionStatus::Done;
+        }
         if self.flags.get(&qnum).copied().unwrap_or(false) {
             return QuestionStatus::Flagged;
         }
-
-        if let Some(answer) = self.answers.get(&qnum) {
-            if is_answer_complete(answer) {
-                QuestionStatus::Done
-            } else {
-                QuestionStatus::Partial
-            }
-        } else if self.visited.get(&qnum).copied().unwrap_or(false) {
-            QuestionStatus::Empty
-        } else {
-            QuestionStatus::Unread
+        if self.answers.contains_key(&qnum) {
+            return QuestionStatus::Answered;
         }
+        if self.visited.get(&qnum).copied().unwrap_or(false) {
+            return QuestionStatus::NotAnswered;
+        }
+        QuestionStatus::Unread
     }
 
     pub fn status_counts(&self) -> StatusCounts {
@@ -151,13 +151,51 @@ impl AppState {
         for q in &self.quiz.questions {
             match self.question_status(q.number) {
                 QuestionStatus::Unread => counts.unread += 1,
-                QuestionStatus::Empty => counts.empty += 1,
-                QuestionStatus::Partial => counts.partial += 1,
+                QuestionStatus::NotAnswered => counts.not_answered += 1,
+                QuestionStatus::Answered => counts.answered += 1,
                 QuestionStatus::Done => counts.done += 1,
                 QuestionStatus::Flagged => counts.flagged += 1,
             }
         }
         counts
+    }
+
+    /// Toggle done mark. Returns false if marking done but no answer exists.
+    pub fn toggle_done(&mut self) -> bool {
+        let qnum = self.current_question_number();
+        let currently_done = self.done_marks.get(&qnum).copied().unwrap_or(false);
+        if currently_done {
+            self.done_marks.insert(qnum, false);
+            true
+        } else {
+            if !self.answers.contains_key(&qnum) {
+                return false;
+            }
+            self.done_marks.insert(qnum, true);
+            // Mutually exclusive: clear flag
+            self.flags.insert(qnum, false);
+            true
+        }
+    }
+
+    pub fn toggle_flag(&mut self) {
+        let qnum = self.current_question_number();
+        let current = self.flags.get(&qnum).copied().unwrap_or(false);
+        if current {
+            self.flags.insert(qnum, false);
+        } else {
+            self.flags.insert(qnum, true);
+            // Mutually exclusive: clear done
+            self.done_marks.insert(qnum, false);
+        }
+    }
+
+    pub fn is_done(&self, qnum: u32) -> bool {
+        self.done_marks.get(&qnum).copied().unwrap_or(false)
+    }
+
+    pub fn is_flagged(&self, qnum: u32) -> bool {
+        self.flags.get(&qnum).copied().unwrap_or(false)
     }
 
     pub fn navigate_to(&mut self, idx: usize) {
@@ -321,16 +359,6 @@ impl AppState {
         }
     }
 
-    pub fn remove_file(&mut self, qnum: u32, idx: usize) {
-        if let Some(answer) = self.answers.get_mut(&qnum) {
-            if let Some(files) = &mut answer.files {
-                if idx < files.len() {
-                    files.remove(idx);
-                }
-            }
-        }
-    }
-
     pub fn has_dialog(&self) -> bool {
         !self.dialog_stack.is_empty()
     }
@@ -351,8 +379,8 @@ impl AppState {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum QuestionStatus {
     Unread,
-    Empty,
-    Partial,
+    NotAnswered,
+    Answered,
     Done,
     Flagged,
 }
@@ -360,39 +388,8 @@ pub enum QuestionStatus {
 #[derive(Debug, Default)]
 pub struct StatusCounts {
     pub unread: usize,
-    pub empty: usize,
-    pub partial: usize,
+    pub not_answered: usize,
+    pub answered: usize,
     pub done: usize,
     pub flagged: usize,
-}
-
-fn is_answer_complete(answer: &Answer) -> bool {
-    match answer.answer_type.as_str() {
-        "single" => answer
-            .selected
-            .as_ref()
-            .map(|s| !s.is_empty())
-            .unwrap_or(false),
-        "multi" => answer
-            .selected
-            .as_ref()
-            .map(|s| !s.is_empty())
-            .unwrap_or(false),
-        "short" => answer
-            .text
-            .as_ref()
-            .map(|t| !t.trim().is_empty())
-            .unwrap_or(false),
-        "long" => answer
-            .text
-            .as_ref()
-            .map(|t| !t.trim().is_empty())
-            .unwrap_or(false),
-        "file" => answer
-            .files
-            .as_ref()
-            .map(|f| !f.is_empty())
-            .unwrap_or(false),
-        _ => false,
-    }
 }

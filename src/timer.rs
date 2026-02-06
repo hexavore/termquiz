@@ -48,12 +48,12 @@ pub fn spawn_timer(
 
 pub fn format_duration(total_secs: i64) -> String {
     if total_secs <= 0 {
-        return "0h 0m 0s".to_string();
+        return "0h 00m 00s".to_string();
     }
     let hours = total_secs / 3600;
     let minutes = (total_secs % 3600) / 60;
     let seconds = total_secs % 60;
-    format!("{}h {}m {}s", hours, minutes, seconds)
+    format!("{}h {:02}m {:02}s", hours, minutes, seconds)
 }
 
 pub fn time_until_start(

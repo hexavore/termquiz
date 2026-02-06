@@ -59,6 +59,10 @@ pub struct SessionData {
     pub quiz_file_hash: String,
     #[serde(default)]
     pub acknowledgment: Option<AckData>,
+    #[serde(default)]
+    pub done_marks: HashMap<u32, bool>,
+    #[serde(default)]
+    pub flags: HashMap<u32, bool>,
 }
 
 pub fn save_state(state: &AppState, state_dir: &Path) -> Result<(), String> {
@@ -71,6 +75,8 @@ pub fn save_state(state: &AppState, state_dir: &Path) -> Result<(), String> {
         current_question: state.current_question,
         quiz_file_hash: state.quiz.quiz_hash.clone(),
         acknowledgment: state.ack_data.clone(),
+        done_marks: state.done_marks.clone(),
+        flags: state.flags.clone(),
     };
 
     let session_toml =
@@ -102,6 +108,8 @@ pub fn load_state(state: &mut AppState, state_dir: &Path) -> Result<bool, String
 
     state.started_at = session.started_at;
     state.ack_data = session.acknowledgment;
+    state.done_marks = session.done_marks;
+    state.flags = session.flags;
 
     // Navigate to saved question
     if session.current_question < state.quiz.questions.len() {
@@ -176,8 +184,8 @@ pub fn print_status(state: &AppState) {
     println!("Quiz: {}", state.quiz.title);
     println!("Questions: {}", total);
     println!(
-        "  Done: {}, Partial: {}, Empty: {}, Flagged: {}, Unread: {}",
-        counts.done, counts.partial, counts.empty, counts.flagged, counts.unread
+        "  Done: {}, Answered: {}, Not answered: {}, Flagged: {}, Unread: {}",
+        counts.done, counts.answered, counts.not_answered, counts.flagged, counts.unread
     );
     if let Some(ref started) = state.started_at {
         println!("Started: {}", started);

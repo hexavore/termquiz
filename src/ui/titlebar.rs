@@ -24,8 +24,7 @@ pub fn draw_titlebar(f: &mut Frame, area: Rect, state: &AppState) {
             Span::styled(
                 formatted,
                 Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                    .fg(Color::Rgb(200, 200, 120)),
             )
         }
     } else {

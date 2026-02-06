@@ -1,12 +1,140 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::Frame;
 
 use crate::model::QuestionKind;
 use crate::state::AppState;
 use crate::ui::markdown::body_elements_to_lines;
+
+/// Maps content lines to clickable elements for mouse handling.
+pub struct QuestionHitMap {
+    pub button_line: usize,
+    /// (first_content_line, choice_index) for each choice option.
+    pub choice_lines: Vec<(usize, usize)>,
+}
+
+/// Compute the hit map for the current question, mirroring draw_question's layout.
+pub fn compute_hit_map(state: &AppState, area_width: u16) -> Option<QuestionHitMap> {
+    let question = state.current_question()?;
+    let qnum = question.number;
+    let mut line_count: usize = 0;
+
+    // Header: title + blank
+    line_count += 2;
+
+    // Body lines
+    let body_lines = body_elements_to_lines(&question.body_lines);
+    line_count += body_lines.len();
+
+    // Answer widget
+    let mut choice_lines: Vec<(usize, usize)> = Vec::new();
+    match &question.kind {
+        QuestionKind::SingleChoice(choices) | QuestionKind::MultiChoice(choices) => {
+            line_count += 1; // blank line before choices
+            for (i, choice) in choices.iter().enumerate() {
+                choice_lines.push((line_count, i));
+                let prefix_len = 10; // "  (●) A. " ≈ 10
+                let text_width = (area_width as usize).saturating_sub(prefix_len);
+                let wrapped = wrap_text(&choice.text, text_width);
+                line_count += wrapped.len();
+            }
+        }
+        QuestionKind::Short => {
+            line_count += 1; // blank
+            line_count += 3; // input box (top border, content, bottom border)
+        }
+        QuestionKind::Long => {
+            line_count += 1; // blank
+            let answer_text = state
+                .answers
+                .get(&qnum)
+                .and_then(|a| a.text.as_ref())
+                .cloned()
+                .unwrap_or_default();
+            if answer_text.is_empty() {
+                line_count += 1; // "No content yet"
+            } else {
+                let preview_count = answer_text.lines().take(5).count();
+                line_count += preview_count;
+                if answer_text.lines().count() > 5 {
+                    line_count += 1; // "... (N more lines)"
+                }
+            }
+            line_count += 1; // blank
+            line_count += 1; // "[Ctrl+E] Open editor"
+        }
+        QuestionKind::File(constraints) => {
+            line_count += 1; // blank
+            let files = state.get_file_list(qnum);
+            if files.is_empty() {
+                line_count += 1;
+            } else {
+                line_count += files.len();
+            }
+            line_count += 1; // blank
+            let mut has_constraints = false;
+            if constraints.max_files.is_some()
+                || constraints.max_size.is_some()
+                || !constraints.accept.is_empty()
+            {
+                has_constraints = true;
+                line_count += 1;
+            }
+            let _ = has_constraints;
+            line_count += 1; // "[Ctrl+A] Attach file"
+        }
+    }
+
+    // Hints
+    let revealed = state.hints_revealed.get(&qnum).copied().unwrap_or(0);
+    let total_hints = question.hints.len();
+    if total_hints > 0 {
+        line_count += 1; // blank
+        line_count += revealed.min(total_hints); // revealed hints
+        let remaining = total_hints.saturating_sub(revealed);
+        if remaining > 0 {
+            line_count += 1; // "[Ctrl+H] Show hint"
+        }
+    }
+
+    // Button row: blank + buttons
+    line_count += 1; // blank
+    let button_line = line_count;
+
+    Some(QuestionHitMap {
+        button_line,
+        choice_lines,
+    })
+}
+
+/// Wrap text to fit within `width` columns, breaking at word boundaries.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut result = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if current.is_empty() {
+            current = word.to_string();
+        } else if current.len() + 1 + word.len() <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            result.push(current);
+            current = word.to_string();
+        }
+    }
+    if !current.is_empty() {
+        result.push(current);
+    }
+    if result.is_empty() {
+        result.push(String::new());
+    }
+    result
+}
 
 pub fn draw_question(f: &mut Frame, area: Rect, state: &AppState) {
     let Some(question) = state.current_question() else {
@@ -46,56 +174,68 @@ pub fn draw_question(f: &mut Frame, area: Rect, state: &AppState) {
             lines.push(Line::from(""));
             for (i, choice) in choices.iter().enumerate() {
                 let is_selected = state.is_choice_selected(qnum, choice.label);
-                let is_cursor = i == state.choice_cursor;
+                let letter = (b'A' + i as u8) as char;
 
                 let radio = if is_selected { "(●)" } else { "( )" };
-                let cursor = if is_cursor { "▸ " } else { "  " };
 
-                let style = if is_cursor {
-                    Style::default().fg(Color::Yellow)
-                } else if is_selected {
+                let style = if is_selected {
                     Style::default().fg(Color::Green)
                 } else {
                     Style::default()
                 };
 
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(cursor.to_string(), style),
-                    Span::styled(format!("{} ", radio), style),
-                    Span::styled(
-                        format!("{}) {}", choice.label, choice.text),
-                        style,
-                    ),
-                ]));
+                // Prefix: "  (●) A. " = 9 chars
+                let prefix = format!("  {} {}. ", radio, letter);
+                let prefix_len = prefix.len();
+                let text_width = (area.width as usize).saturating_sub(prefix_len);
+                let wrapped = wrap_text(&choice.text, text_width);
+                for (li, wline) in wrapped.iter().enumerate() {
+                    if li == 0 {
+                        lines.push(Line::from(vec![
+                            Span::styled(prefix.clone(), style),
+                            Span::styled(wline.clone(), style),
+                        ]));
+                    } else {
+                        lines.push(Line::from(vec![
+                            Span::raw(" ".repeat(prefix_len)),
+                            Span::styled(wline.clone(), style),
+                        ]));
+                    }
+                }
             }
         }
         QuestionKind::MultiChoice(choices) => {
             lines.push(Line::from(""));
             for (i, choice) in choices.iter().enumerate() {
                 let is_selected = state.is_choice_selected(qnum, choice.label);
-                let is_cursor = i == state.choice_cursor;
+                let letter = (b'A' + i as u8) as char;
 
                 let checkbox = if is_selected { "[x]" } else { "[ ]" };
-                let cursor = if is_cursor { "▸ " } else { "  " };
 
-                let style = if is_cursor {
-                    Style::default().fg(Color::Yellow)
-                } else if is_selected {
+                let style = if is_selected {
                     Style::default().fg(Color::Green)
                 } else {
                     Style::default()
                 };
 
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(cursor.to_string(), style),
-                    Span::styled(format!("{} ", checkbox), style),
-                    Span::styled(
-                        format!("{}) {}", choice.label, choice.text),
-                        style,
-                    ),
-                ]));
+                // Prefix: "  [x] A. " = 9 chars
+                let prefix = format!("  {} {}. ", checkbox, letter);
+                let prefix_len = prefix.len();
+                let text_width = (area.width as usize).saturating_sub(prefix_len);
+                let wrapped = wrap_text(&choice.text, text_width);
+                for (li, wline) in wrapped.iter().enumerate() {
+                    if li == 0 {
+                        lines.push(Line::from(vec![
+                            Span::styled(prefix.clone(), style),
+                            Span::styled(wline.clone(), style),
+                        ]));
+                    } else {
+                        lines.push(Line::from(vec![
+                            Span::raw(" ".repeat(prefix_len)),
+                            Span::styled(wline.clone(), style),
+                        ]));
+                    }
+                }
             }
         }
         QuestionKind::Short => {
@@ -192,24 +332,14 @@ pub fn draw_question(f: &mut Frame, area: Rect, state: &AppState) {
                     Style::default().fg(Color::DarkGray),
                 )));
             } else {
-                for (i, file) in files.iter().enumerate() {
-                    let is_cursor = i == state.file_cursor;
+                for (_i, file) in files.iter().enumerate() {
                     let filename = std::path::Path::new(file)
                         .file_name()
                         .unwrap_or_default()
                         .to_string_lossy();
-                    let style = if is_cursor {
-                        Style::default().fg(Color::Yellow)
-                    } else {
-                        Style::default()
-                    };
                     lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(
-                            if is_cursor { "▸ " } else { "  " }.to_string(),
-                            style,
-                        ),
-                        Span::styled(format!("📎 {}", filename), style),
+                        Span::raw("    "),
+                        Span::raw(format!("📎 {}", filename)),
                     ]));
                 }
             }
@@ -236,7 +366,7 @@ pub fn draw_question(f: &mut Frame, area: Rect, state: &AppState) {
             }
 
             lines.push(Line::from(Span::styled(
-                "  [Ctrl+A] Attach file   [Ctrl+D] Delete selected",
+                "  [Ctrl+A] Attach file",
                 Style::default().fg(Color::DarkGray),
             )));
         }
@@ -265,14 +395,42 @@ pub fn draw_question(f: &mut Frame, area: Rect, state: &AppState) {
         }
     }
 
+    // Done / Flag buttons
+    lines.push(Line::from(""));
+    let is_done = state.is_done(qnum);
+    let is_flagged = state.is_flagged(qnum);
+
+    let done_style = if is_done {
+        Style::default().fg(Color::White).bg(Color::Green).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray).bg(Color::Rgb(50, 50, 50))
+    };
+    let done_ul_style = done_style.add_modifier(Modifier::UNDERLINED);
+    let flag_style = if is_flagged {
+        Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray).bg(Color::Rgb(50, 50, 50))
+    };
+    let flag_ul_style = flag_style.add_modifier(Modifier::UNDERLINED);
+
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(" ✓ DO", done_style),
+        Span::styled("N", done_ul_style),
+        Span::styled("E ", done_style),
+        Span::raw("  "),
+        Span::styled(" ⚑ ", flag_style),
+        Span::styled("F", flag_ul_style),
+        Span::styled("LAG ", flag_style),
+    ]));
+
     // Apply scroll with clamping
     let total_content_lines = lines.len();
     let visible_height = area.height as usize;
     let scroll = state.question_scroll.min(total_content_lines.saturating_sub(visible_height));
     let display_lines: Vec<Line> = lines.into_iter().skip(scroll).collect();
 
-    let widget = Paragraph::new(display_lines)
-        .wrap(Wrap { trim: false });
+    let widget = Paragraph::new(display_lines);
     f.render_widget(widget, area);
 
     // Scrollbar

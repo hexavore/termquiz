@@ -333,10 +333,14 @@ fn handle_working_key(
                 state.push_dialog(Dialog::ConfirmSubmit);
                 return Ok(());
             }
+            KeyCode::Char('n') => {
+                if !state.toggle_done() {
+                    state.push_dialog(Dialog::DoneRequiresAnswer);
+                }
+                return Ok(());
+            }
             KeyCode::Char('f') => {
-                let qnum = state.current_question_number();
-                let current = state.flags.get(&qnum).copied().unwrap_or(false);
-                state.flags.insert(qnum, !current);
+                state.toggle_flag();
                 return Ok(());
             }
             KeyCode::Char('h') => {
@@ -436,18 +440,6 @@ fn handle_working_key(
                                 // For now, skip
                             }
                             Err(_) => {}
-                        }
-                    }
-                }
-                return Ok(());
-            }
-            KeyCode::Char('d') => {
-                if let Some(q) = state.current_question() {
-                    if matches!(q.kind, QuestionKind::File(_)) {
-                        let qnum = q.number;
-                        let files = state.get_file_list(qnum);
-                        if !files.is_empty() && state.file_cursor < files.len() {
-                            state.push_dialog(Dialog::ConfirmDeleteFile(state.file_cursor));
                         }
                     }
                 }
@@ -670,21 +662,9 @@ fn handle_dialog_key(
             }
             _ => {}
         },
-        Some(Dialog::ConfirmDeleteFile(idx)) => match key.code {
-            KeyCode::Enter => {
-                state.pop_dialog();
-                let qnum = state.current_question_number();
-                state.remove_file(qnum, idx);
-                let files = state.get_file_list(qnum);
-                if state.file_cursor >= files.len() && !files.is_empty() {
-                    state.file_cursor = files.len() - 1;
-                }
-            }
-            KeyCode::Esc => {
-                state.pop_dialog();
-            }
-            _ => {}
-        },
+        Some(Dialog::DoneRequiresAnswer) => {
+            state.pop_dialog();
+        }
         Some(Dialog::TwoMinuteWarning) => match key.code {
             KeyCode::Enter | KeyCode::Esc => {
                 state.pop_dialog();
@@ -924,51 +904,56 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, size: Rect) -> Result<(
                     state.active_panel = ActivePanel::Main;
                 }
             }
-            // Click in main area (for choice selection)
+            // Click in main area (for choice selection and buttons)
             else if x >= layout.main.x
                 && x < layout.main.x + layout.main.width
                 && y >= layout.main.y
                 && y < layout.main.y + layout.main.height
             {
                 state.dragging_scrollbar = false;
-                if let Some(q) = state.current_question().cloned() {
-                    match &q.kind {
-                        QuestionKind::SingleChoice(choices) | QuestionKind::MultiChoice(choices) => {
-                            let visible_y = y.saturating_sub(layout.main.y) as usize;
-                            let actual_y = visible_y + state.question_scroll;
-                            let body_rendered = q.body_lines.len().max(1) * 2;
-                            let header_offset = 4 + body_rendered;
+                let rel_x = x.saturating_sub(layout.main.x) as usize;
+                let visible_y = y.saturating_sub(layout.main.y) as usize;
+                let content_line = visible_y + state.question_scroll;
 
-                            if actual_y >= header_offset {
-                                let choice_idx = actual_y - header_offset;
-                                if choice_idx < choices.len() {
-                                    state.choice_cursor = choice_idx;
-                                    match &q.kind {
-                                        QuestionKind::SingleChoice(_) => {
-                                            state.select_single_choice(choice_idx);
-                                        }
-                                        QuestionKind::MultiChoice(_) => {
-                                            state.toggle_multi_choice(choice_idx);
-                                        }
-                                        _ => {}
+                if let Some(hit_map) = crate::ui::question::compute_hit_map(state, layout.main.width) {
+                    if content_line == hit_map.button_line {
+                        // Done button: columns 2..10, Flag button: columns 12..20
+                        if (2..10).contains(&rel_x) {
+                            if !state.toggle_done() {
+                                state.push_dialog(Dialog::DoneRequiresAnswer);
+                            }
+                        } else if (12..20).contains(&rel_x) {
+                            state.toggle_flag();
+                        }
+                    } else if !hit_map.choice_lines.is_empty() {
+                        // Find which choice was clicked (each choice may span multiple wrapped lines)
+                        let mut clicked_choice = None;
+                        for (ci, &(start, idx)) in hit_map.choice_lines.iter().enumerate() {
+                            let end = if ci + 1 < hit_map.choice_lines.len() {
+                                hit_map.choice_lines[ci + 1].0
+                            } else {
+                                // choices end before hints/buttons section
+                                hit_map.button_line.saturating_sub(1) // at least the blank before buttons
+                            };
+                            if content_line >= start && content_line < end {
+                                clicked_choice = Some(idx);
+                                break;
+                            }
+                        }
+                        if let Some(choice_idx) = clicked_choice {
+                            if let Some(q) = state.current_question().cloned() {
+                                state.choice_cursor = choice_idx;
+                                match &q.kind {
+                                    QuestionKind::SingleChoice(_) => {
+                                        state.select_single_choice(choice_idx);
                                     }
+                                    QuestionKind::MultiChoice(_) => {
+                                        state.toggle_multi_choice(choice_idx);
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
-                        QuestionKind::File(_) => {
-                            let files = state.get_file_list(q.number);
-                            let visible_y = y.saturating_sub(layout.main.y) as usize;
-                            let actual_y = visible_y + state.question_scroll;
-                            let body_rendered = q.body_lines.len().max(1) * 2;
-                            let header_offset = 4 + body_rendered;
-                            if actual_y >= header_offset && !files.is_empty() {
-                                let file_idx = actual_y - header_offset;
-                                if file_idx < files.len() {
-                                    state.file_cursor = file_idx;
-                                }
-                            }
-                        }
-                        _ => {}
                     }
                 }
             } else {

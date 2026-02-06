@@ -97,14 +97,14 @@ pub fn build_commit_message(state: &AppState) -> String {
     let counts = state.status_counts();
     let total = state.quiz.questions.len();
     format!(
-        "termquiz: submit {}\n\nStarted: {}\nSubmitted: {}\nQuestions: {} ({} complete, {} partial, {} flagged, {} empty)",
+        "termquiz: submit {}\n\nStarted: {}\nSubmitted: {}\nQuestions: {} ({} done, {} answered, {} flagged, {} not answered)",
         state.quiz.quiz_file,
         state.started_at.as_deref().unwrap_or("unknown"),
         state.submitted_at.as_deref().unwrap_or("unknown"),
         total,
         counts.done,
-        counts.partial,
+        counts.answered,
         counts.flagged,
-        counts.empty + counts.unread,
+        counts.not_answered + counts.unread,
     )
 }

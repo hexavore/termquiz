@@ -6,7 +6,6 @@ pub mod markdown;
 pub mod question;
 pub mod result;
 pub mod sidebar;
-pub mod statusbar;
 pub mod titlebar;
 pub mod waiting;
 
@@ -57,7 +56,6 @@ fn draw_working(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     titlebar::draw_titlebar(f, layout.titlebar, state);
     sidebar::draw_sidebar(f, layout.sidebar, state);
     question::draw_question(f, layout.main, state);
-    statusbar::draw_statusbar(f, layout.statusbar, state);
     keybar::draw_keybar(f, layout.keybar, state);
 
     // Draw dialog overlay if any

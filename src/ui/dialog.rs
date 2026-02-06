@@ -15,7 +15,7 @@ pub fn draw_dialog(f: &mut Frame, area: Rect, state: &AppState) {
         Dialog::ConfirmSubmit => draw_confirm_submit(f, area, state),
         Dialog::ConfirmQuit => draw_confirm_quit(f, area, state),
         Dialog::ConfirmHint => draw_confirm_hint(f, area, state),
-        Dialog::ConfirmDeleteFile(idx) => draw_confirm_delete(f, area, *idx),
+        Dialog::DoneRequiresAnswer => draw_done_requires_answer(f, area),
         Dialog::TwoMinuteWarning => draw_two_minute_warning(f, area),
         Dialog::Help => draw_help(f, area),
     }
@@ -40,11 +40,11 @@ fn draw_confirm_submit(f: &mut Frame, area: Rect, state: &AppState) {
         Line::from(""),
     ];
 
-    if counts.empty + counts.unread > 0 {
+    if counts.not_answered + counts.unread > 0 {
         msg_lines.push(Line::from(Span::styled(
             format!(
-                "   {} questions are still empty.",
-                counts.empty + counts.unread
+                "   {} questions are not answered.",
+                counts.not_answered + counts.unread
             ),
             Style::default().fg(Color::White),
         )));
@@ -134,21 +134,22 @@ fn draw_confirm_hint(f: &mut Frame, area: Rect, _state: &AppState) {
     f.render_widget(widget, rect);
 }
 
-fn draw_confirm_delete(f: &mut Frame, area: Rect, _idx: usize) {
+fn draw_done_requires_answer(f: &mut Frame, area: Rect) {
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "   Delete this file?",
+            "   Cannot mark as done",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("   [Enter] Confirm", Style::default().fg(Color::Green)),
-            Span::raw("    "),
-            Span::styled("[Esc] Cancel", Style::default().fg(Color::DarkGray)),
-        ]),
+        Line::from("   Answer the question first."),
+        Line::from(""),
+        Line::from(Span::styled(
+            "           [OK]",
+            Style::default().fg(Color::Green),
+        )),
         Line::from(""),
     ];
 
@@ -205,11 +206,11 @@ fn draw_help(f: &mut Frame, area: Rect) {
         Line::from("   Home/End   First/Last question"),
         Line::from("   a-z        Select/toggle choice"),
         Line::from("   Tab        Switch panel"),
+        Line::from("   Ctrl+N     Toggle done mark"),
         Line::from("   Ctrl+H     Reveal next hint"),
         Line::from("   Ctrl+F     Toggle flag"),
         Line::from("   Ctrl+E     Open editor (long)"),
         Line::from("   Ctrl+A     Attach file"),
-        Line::from("   Ctrl+D     Delete attachment"),
         Line::from("   Ctrl+S     Submit quiz"),
         Line::from("   Ctrl+Q     Quit (saves state)"),
         Line::from("   ?          This help"),
