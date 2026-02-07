@@ -1,34 +1,198 @@
-use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use crate::model::{AckData, Answer};
+use crate::model::AckData;
 use crate::state::AppState;
+use crate::submit;
 
-pub fn state_dir_for(canonical_path: &Path) -> PathBuf {
-    if let Ok(override_dir) = std::env::var("TERMQUIZ_STATE") {
-        return PathBuf::from(override_dir);
-    }
+pub fn save_state(state: &AppState) -> Result<(), String> {
+    let response_dir = state.repo_dir.join("response");
+    fs::create_dir_all(&response_dir)
+        .map_err(|e| format!("Cannot create response dir: {}", e))?;
 
-    let hash = {
-        let mut hasher = Sha256::new();
-        hasher.update(canonical_path.to_string_lossy().as_bytes());
-        let result = hasher.finalize();
-        hex_encode(&result[..4])
-    };
+    let yaml = submit::build_answers_yaml(state);
+    atomic_write(&response_dir.join("answers.yaml"), &yaml)?;
 
-    let base = dirs_state_base();
-    base.join("termquiz").join(hash)
+    Ok(())
 }
 
-fn dirs_state_base() -> PathBuf {
-    if let Ok(state_home) = std::env::var("XDG_STATE_HOME") {
-        PathBuf::from(state_home)
-    } else {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".local").join("state")
+pub fn load_state(state: &mut AppState) -> Result<bool, String> {
+    let yaml_path = state.repo_dir.join("response").join("answers.yaml");
+    if !yaml_path.exists() {
+        return Ok(false);
+    }
+
+    let content = fs::read_to_string(&yaml_path)
+        .map_err(|e| format!("Cannot read answers.yaml: {}", e))?;
+
+    let doc: serde_yaml::Value = serde_yaml::from_str(&content)
+        .map_err(|e| format!("Corrupt answers.yaml: {} (use --clear to reset)", e))?;
+
+    // Verify quiz hash
+    if let Some(hash) = doc["session"]["quiz_file_hash"].as_str() {
+        if hash != state.quiz.quiz_hash {
+            return Err("Quiz file has changed since last session. Use --clear to reset.".to_string());
+        }
+    }
+
+    // Restore session metadata
+    if let Some(v) = doc["session"]["current_question"].as_u64() {
+        if (v as usize) < state.quiz.questions.len() {
+            state.current_question = v as usize;
+        }
+    }
+    if let Some(v) = doc["quiz"]["submitted_at"].as_str() {
+        if v != "unknown" {
+            state.submitted_at = Some(v.to_string());
+        }
+    }
+    if let Some(v) = doc["session"]["started_at"].as_str() {
+        state.started_at = Some(v.to_string());
+    }
+
+    // Restore acknowledgment
+    if let Some(ack) = doc["session"]["acknowledgment"].as_mapping() {
+        let name = ack.get(serde_yaml::Value::String("name".into()))
+            .and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let agreed_at = ack.get(serde_yaml::Value::String("agreed_at".into()))
+            .and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let text_hash = ack.get(serde_yaml::Value::String("text_hash".into()))
+            .and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if !name.is_empty() {
+            state.ack_data = Some(AckData { name, agreed_at, text_hash });
+        }
+    }
+
+    // Restore per-question data
+    if let Some(questions) = doc["questions"].as_sequence() {
+        for q_val in questions {
+            let number = match q_val["number"].as_u64() {
+                Some(n) => n as u32,
+                None => continue,
+            };
+            let qtype = q_val["type"].as_str().unwrap_or("");
+
+            // Restore answer
+            let answer_val = &q_val["answer"];
+            if !answer_val.is_null() {
+                let answer = match qtype {
+                    "single" => {
+                        if let Some(label) = answer_val.as_str() {
+                            Some(crate::model::Answer {
+                                answer_type: "single".to_string(),
+                                selected: Some(vec![label.to_string()]),
+                                text: None,
+                                files: None,
+                            })
+                        } else { None }
+                    }
+                    "multi" => {
+                        if let Some(seq) = answer_val.as_sequence() {
+                            let labels: Vec<String> = seq.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect();
+                            Some(crate::model::Answer {
+                                answer_type: "multi".to_string(),
+                                selected: Some(labels),
+                                text: None,
+                                files: None,
+                            })
+                        } else { None }
+                    }
+                    "short" => {
+                        if let Some(text) = answer_val.as_str() {
+                            Some(crate::model::Answer {
+                                answer_type: "short".to_string(),
+                                selected: None,
+                                text: Some(text.to_string()),
+                                files: None,
+                            })
+                        } else { None }
+                    }
+                    "long" => {
+                        if let Some(text) = answer_val.as_str() {
+                            Some(crate::model::Answer {
+                                answer_type: "long".to_string(),
+                                selected: None,
+                                text: Some(text.to_string()),
+                                files: None,
+                            })
+                        } else { None }
+                    }
+                    "file" => {
+                        if let Some(seq) = answer_val.as_sequence() {
+                            let files: Vec<String> = seq.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect();
+                            Some(crate::model::Answer {
+                                answer_type: "file".to_string(),
+                                selected: None,
+                                text: None,
+                                files: Some(files),
+                            })
+                        } else { None }
+                    }
+                    _ => None,
+                };
+                if let Some(a) = answer {
+                    state.answers.insert(number, a);
+                    state.visited.insert(number, true);
+                }
+            }
+
+            // Restore done/flagged
+            if q_val["done"].as_bool().unwrap_or(false) {
+                state.done_marks.insert(number, true);
+            }
+            if q_val["flagged"].as_bool().unwrap_or(false) {
+                state.flags.insert(number, true);
+            }
+
+            // Restore hint_used
+            if q_val["hint_used"].as_bool().unwrap_or(false) {
+                state.hints_revealed.insert(number, 1);
+            }
+        }
+    }
+
+    Ok(true)
+}
+
+pub fn clear_state(repo_dir: &Path) -> Result<(), String> {
+    let response_dir = repo_dir.join("response");
+    if response_dir.exists() {
+        fs::remove_dir_all(&response_dir)
+            .map_err(|e| format!("Cannot clear state: {}", e))?;
+    }
+    Ok(())
+}
+
+fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, content).map_err(|e| format!("Cannot write {}: {}", tmp.display(), e))?;
+    fs::rename(&tmp, path).map_err(|e| format!("Cannot rename: {}", e))?;
+    Ok(())
+}
+
+pub fn export_answers(state: &AppState, path: &str) -> Result<(), String> {
+    let yaml = submit::build_answers_yaml(state);
+    fs::write(path, &yaml).map_err(|e| format!("Cannot export: {}", e))?;
+    Ok(())
+}
+
+pub fn print_status(state: &AppState) {
+    let counts = state.status_counts();
+    let total = state.quiz.questions.len();
+    println!("Quiz: {}", state.quiz.title);
+    println!("Questions: {}", total);
+    println!(
+        "  Done: {}, Answered: {}, Not answered: {}, Flagged: {}, Unread: {}",
+        counts.done, counts.answered, counts.not_answered, counts.flagged, counts.unread
+    );
+    if let Some(ref started) = state.started_at {
+        println!("Started: {}", started);
     }
 }
 
@@ -50,144 +214,4 @@ pub fn compute_str_hash(s: &str) -> String {
     hasher.update(s.as_bytes());
     let result = hasher.finalize();
     format!("sha256:{}", hex_encode(&result))
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
-pub struct SessionData {
-    pub started_at: Option<String>,
-    pub current_question: usize,
-    pub quiz_file_hash: String,
-    #[serde(default)]
-    pub acknowledgment: Option<AckData>,
-    #[serde(default)]
-    pub done_marks: HashMap<u32, bool>,
-    #[serde(default)]
-    pub flags: HashMap<u32, bool>,
-}
-
-pub fn save_state(state: &AppState, state_dir: &Path) -> Result<(), String> {
-    fs::create_dir_all(state_dir)
-        .map_err(|e| format!("Cannot create state dir: {}", e))?;
-
-    // Save session
-    let session = SessionData {
-        started_at: state.started_at.clone(),
-        current_question: state.current_question,
-        quiz_file_hash: state.quiz.quiz_hash.clone(),
-        acknowledgment: state.ack_data.clone(),
-        done_marks: state.done_marks.clone(),
-        flags: state.flags.clone(),
-    };
-
-    let session_toml =
-        toml::to_string_pretty(&session).map_err(|e| format!("Cannot serialize session: {}", e))?;
-    atomic_write(&state_dir.join("session.toml"), &session_toml)?;
-
-    // Save answers
-    let answers_toml = serialize_answers(&state.answers)?;
-    atomic_write(&state_dir.join("answers.toml"), &answers_toml)?;
-
-    Ok(())
-}
-
-pub fn load_state(state: &mut AppState, state_dir: &Path) -> Result<bool, String> {
-    let session_path = state_dir.join("session.toml");
-    if !session_path.exists() {
-        return Ok(false);
-    }
-
-    let session_str = fs::read_to_string(&session_path)
-        .map_err(|e| format!("Cannot read session: {}", e))?;
-    let session: SessionData = toml::from_str(&session_str)
-        .map_err(|e| format!("Corrupt session.toml: {} (use --clear to reset)", e))?;
-
-    // Verify hash matches
-    if session.quiz_file_hash != state.quiz.quiz_hash {
-        return Err("Quiz file has changed since last session. Use --clear to reset.".to_string());
-    }
-
-    state.started_at = session.started_at;
-    state.ack_data = session.acknowledgment;
-    state.done_marks = session.done_marks;
-    state.flags = session.flags;
-
-    // Navigate to saved question
-    if session.current_question < state.quiz.questions.len() {
-        state.current_question = session.current_question;
-    }
-
-    // Load answers
-    let answers_path = state_dir.join("answers.toml");
-    if answers_path.exists() {
-        let answers_str = fs::read_to_string(&answers_path)
-            .map_err(|e| format!("Cannot read answers: {}", e))?;
-        let answers = deserialize_answers(&answers_str)?;
-        state.answers = answers;
-
-        // Mark all answered questions as visited
-        for &qnum in state.answers.keys() {
-            state.visited.insert(qnum, true);
-        }
-    }
-
-    Ok(true)
-}
-
-pub fn clear_state(state_dir: &Path) -> Result<(), String> {
-    if state_dir.exists() {
-        fs::remove_dir_all(state_dir)
-            .map_err(|e| format!("Cannot clear state: {}", e))?;
-    }
-    Ok(())
-}
-
-fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, content).map_err(|e| format!("Cannot write {}: {}", tmp.display(), e))?;
-    fs::rename(&tmp, path).map_err(|e| format!("Cannot rename: {}", e))?;
-    Ok(())
-}
-
-fn serialize_answers(answers: &HashMap<u32, Answer>) -> Result<String, String> {
-    // Build a BTreeMap for sorted output
-    let mut map = std::collections::BTreeMap::new();
-    for (qnum, answer) in answers {
-        map.insert(format!("q{}", qnum), answer.clone());
-    }
-    toml::to_string_pretty(&map).map_err(|e| format!("Cannot serialize answers: {}", e))
-}
-
-fn deserialize_answers(s: &str) -> Result<HashMap<u32, Answer>, String> {
-    let map: std::collections::BTreeMap<String, Answer> =
-        toml::from_str(s).map_err(|e| format!("Corrupt answers.toml: {} (use --clear to reset)", e))?;
-
-    let mut answers = HashMap::new();
-    for (key, answer) in map {
-        if let Some(num_str) = key.strip_prefix('q') {
-            if let Ok(num) = num_str.parse::<u32>() {
-                answers.insert(num, answer);
-            }
-        }
-    }
-    Ok(answers)
-}
-
-pub fn export_answers(state: &AppState, path: &str) -> Result<(), String> {
-    let answers_toml = serialize_answers(&state.answers)?;
-    fs::write(path, &answers_toml).map_err(|e| format!("Cannot export: {}", e))?;
-    Ok(())
-}
-
-pub fn print_status(state: &AppState) {
-    let counts = state.status_counts();
-    let total = state.quiz.questions.len();
-    println!("Quiz: {}", state.quiz.title);
-    println!("Questions: {}", total);
-    println!(
-        "  Done: {}, Answered: {}, Not answered: {}, Flagged: {}, Unread: {}",
-        counts.done, counts.answered, counts.not_answered, counts.flagged, counts.unread
-    );
-    if let Some(ref started) = state.started_at {
-        println!("Started: {}", started);
-    }
 }

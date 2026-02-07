@@ -1,24 +1,15 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use crate::model::Answer;
+use crate::model::QuestionKind;
 use crate::state::AppState;
 
+/// Build response directory: copy file attachments.
+/// The answers.yaml is already written by persist::save_state.
 pub fn build_response(state: &AppState, repo_dir: &Path) -> Result<(), String> {
     let response_dir = repo_dir.join("response");
     fs::create_dir_all(&response_dir)
         .map_err(|e| format!("Cannot create response dir: {}", e))?;
-
-    // Build meta.toml
-    let meta = build_meta_toml(state);
-    fs::write(response_dir.join("meta.toml"), &meta)
-        .map_err(|e| format!("Cannot write meta.toml: {}", e))?;
-
-    // Build answers.toml
-    let answers = build_answers_toml(&state.answers)?;
-    fs::write(response_dir.join("answers.toml"), &answers)
-        .map_err(|e| format!("Cannot write answers.toml: {}", e))?;
 
     // Copy file attachments
     let files_dir = response_dir.join("files");
@@ -45,52 +36,183 @@ pub fn build_response(state: &AppState, repo_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn build_meta_toml(state: &AppState) -> String {
-    let mut meta = String::new();
-    meta.push_str(&format!("quiz_file = {:?}\n", state.quiz.quiz_file));
-    meta.push_str(&format!("quiz_hash = {:?}\n", state.quiz.quiz_hash));
-    meta.push_str(&format!(
-        "started_at = {:?}\n",
-        state.started_at.as_deref().unwrap_or("unknown")
-    ));
-    meta.push_str(&format!(
-        "submitted_at = {:?}\n",
+pub fn build_answers_yaml(state: &AppState) -> String {
+    let mut out = String::new();
+
+    // quiz metadata
+    out.push_str("quiz:\n");
+    out.push_str(&format!("  title: {:?}\n", state.quiz.title));
+    out.push_str(&format!("  source: {:?}\n", state.quiz.quiz_file));
+    out.push_str(&format!(
+        "  submitted_at: {:?}\n",
         state.submitted_at.as_deref().unwrap_or("unknown")
     ));
-    meta.push_str(&format!("termquiz_version = {:?}\n", env!("CARGO_PKG_VERSION")));
-
-    if let Some(ref ack) = state.ack_data {
-        meta.push_str("\n[acknowledgment]\n");
-        meta.push_str(&format!("name = {:?}\n", ack.name));
-        meta.push_str(&format!("agreed_at = {:?}\n", ack.agreed_at));
-        meta.push_str(&format!("text_hash = {:?}\n", ack.text_hash));
+    out.push_str(&format!(
+        "  duration: {:?}\n",
+        compute_duration(&state.started_at, &state.submitted_at)
+    ));
+    if state.ack_data.is_some() {
+        out.push_str("  acknowledged: true\n");
     }
 
-    // hints used
-    let mut hints_used: Vec<(u32, usize)> = state
-        .hints_revealed
-        .iter()
-        .filter(|(_, &count)| count > 0)
-        .map(|(&q, &c)| (q, c))
-        .collect();
-    hints_used.sort_by_key(|(q, _)| *q);
+    // session state (for restore on restart)
+    out.push_str("\nsession:\n");
+    out.push_str(&format!("  current_question: {}\n", state.current_question));
+    out.push_str(&format!("  quiz_file_hash: {:?}\n", state.quiz.quiz_hash));
+    if let Some(ref started) = state.started_at {
+        out.push_str(&format!("  started_at: {:?}\n", started));
+    }
+    if let Some(ref ack) = state.ack_data {
+        out.push_str("  acknowledgment:\n");
+        out.push_str(&format!("    name: {:?}\n", ack.name));
+        out.push_str(&format!("    agreed_at: {:?}\n", ack.agreed_at));
+        out.push_str(&format!("    text_hash: {:?}\n", ack.text_hash));
+    }
 
-    if !hints_used.is_empty() {
-        meta.push_str("\n[hints_used]\n");
-        for (q, count) in hints_used {
-            meta.push_str(&format!("q{} = {}\n", q, count));
+    // questions
+    out.push_str("\nquestions:\n");
+    for q in &state.quiz.questions {
+        out.push_str(&format!("  - number: {}\n", q.number));
+        out.push_str(&format!("    title: {:?}\n", q.title));
+
+        let answer = state.answers.get(&q.number);
+        let hint_used = state.hints_revealed.get(&q.number).copied().unwrap_or(0) > 0;
+        let done = state.done_marks.get(&q.number).copied().unwrap_or(false);
+        let flagged = state.flags.get(&q.number).copied().unwrap_or(false);
+
+        match &q.kind {
+            QuestionKind::SingleChoice(choices) => {
+                out.push_str("    type: single\n");
+                out.push_str("    choices:\n");
+                for c in choices {
+                    out.push_str(&format!("      {}: {:?}\n", c.label, c.text));
+                }
+                if hint_used {
+                    out.push_str("    hint_used: true\n");
+                }
+                if done {
+                    out.push_str("    done: true\n");
+                }
+                if flagged {
+                    out.push_str("    flagged: true\n");
+                }
+                match answer.and_then(|a| a.selected.as_ref()) {
+                    Some(sel) if !sel.is_empty() => {
+                        out.push_str(&format!("    answer: {}\n", sel[0]));
+                    }
+                    _ => out.push_str("    answer: null\n"),
+                }
+            }
+            QuestionKind::MultiChoice(choices) => {
+                out.push_str("    type: multi\n");
+                out.push_str("    choices:\n");
+                for c in choices {
+                    out.push_str(&format!("      {}: {:?}\n", c.label, c.text));
+                }
+                if hint_used {
+                    out.push_str("    hint_used: true\n");
+                }
+                if done {
+                    out.push_str("    done: true\n");
+                }
+                if flagged {
+                    out.push_str("    flagged: true\n");
+                }
+                match answer.and_then(|a| a.selected.as_ref()) {
+                    Some(sel) if !sel.is_empty() => {
+                        let labels: Vec<&str> = sel.iter().map(|s| s.as_str()).collect();
+                        out.push_str(&format!("    answer: [{}]\n", labels.join(", ")));
+                    }
+                    _ => out.push_str("    answer: null\n"),
+                }
+            }
+            QuestionKind::Short => {
+                out.push_str("    type: short\n");
+                if hint_used {
+                    out.push_str("    hint_used: true\n");
+                }
+                if done {
+                    out.push_str("    done: true\n");
+                }
+                if flagged {
+                    out.push_str("    flagged: true\n");
+                }
+                match answer.and_then(|a| a.text.as_ref()) {
+                    Some(text) => {
+                        out.push_str(&format!("    answer: {:?}\n", text));
+                    }
+                    None => out.push_str("    answer: null\n"),
+                }
+            }
+            QuestionKind::Long => {
+                out.push_str("    type: long\n");
+                if hint_used {
+                    out.push_str("    hint_used: true\n");
+                }
+                if done {
+                    out.push_str("    done: true\n");
+                }
+                if flagged {
+                    out.push_str("    flagged: true\n");
+                }
+                match answer.and_then(|a| a.text.as_ref()) {
+                    Some(text) => {
+                        out.push_str("    answer: |\n");
+                        for line in text.lines() {
+                            out.push_str(&format!("      {}\n", line));
+                        }
+                    }
+                    None => out.push_str("    answer: null\n"),
+                }
+            }
+            QuestionKind::File(_) => {
+                out.push_str("    type: file\n");
+                if hint_used {
+                    out.push_str("    hint_used: true\n");
+                }
+                if done {
+                    out.push_str("    done: true\n");
+                }
+                if flagged {
+                    out.push_str("    flagged: true\n");
+                }
+                match answer.and_then(|a| a.files.as_ref()) {
+                    Some(files) if !files.is_empty() => {
+                        out.push_str("    answer:\n");
+                        for f in files {
+                            let filename = Path::new(f)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| f.clone());
+                            out.push_str(&format!(
+                                "      - files/q{}/{}\n",
+                                q.number, filename
+                            ));
+                        }
+                    }
+                    _ => out.push_str("    answer: null\n"),
+                }
+            }
         }
     }
 
-    meta
+    out
 }
 
-fn build_answers_toml(answers: &HashMap<u32, Answer>) -> Result<String, String> {
-    let mut map = std::collections::BTreeMap::new();
-    for (qnum, answer) in answers {
-        map.insert(format!("q{}", qnum), answer.clone());
+fn compute_duration(started: &Option<String>, submitted: &Option<String>) -> String {
+    if let (Some(s), Some(e)) = (started, submitted) {
+        if let (Ok(start), Ok(end)) = (
+            chrono::DateTime::parse_from_rfc3339(s),
+            chrono::DateTime::parse_from_rfc3339(e),
+        ) {
+            let secs = (end - start).num_seconds().max(0);
+            let h = secs / 3600;
+            let m = (secs % 3600) / 60;
+            let s = secs % 60;
+            return format!("{:02}:{:02}:{:02}", h, m, s);
+        }
     }
-    toml::to_string_pretty(&map).map_err(|e| format!("Cannot serialize answers: {}", e))
+    "unknown".to_string()
 }
 
 pub fn build_commit_message(state: &AppState) -> String {

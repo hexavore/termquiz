@@ -14,7 +14,7 @@ mod ui;
 use clap::Parser;
 
 use crate::cli::Cli;
-use crate::persist::{compute_file_hash, state_dir_for};
+use crate::persist::compute_file_hash;
 use crate::state::{AppState, Screen};
 
 fn main() {
@@ -48,15 +48,9 @@ fn run() -> Result<(), String> {
 
     let quiz = parser::parse_quiz(&content, &quiz_filename, &quiz_hash)?;
 
-    // Compute state directory
-    let canonical = quiz_path
-        .canonicalize()
-        .unwrap_or_else(|_| quiz_path.clone());
-    let state_dir = state_dir_for(&canonical);
-
     // Handle --clear
     if cli.clear {
-        persist::clear_state(&state_dir)?;
+        persist::clear_state(&repo_dir)?;
         eprintln!("State cleared.");
     }
 
@@ -65,7 +59,7 @@ fn run() -> Result<(), String> {
 
     // Load persisted state
     if !cli.clear {
-        match persist::load_state(&mut state, &state_dir) {
+        match persist::load_state(&mut state) {
             Ok(true) => {
                 // State loaded successfully
             }
@@ -129,7 +123,7 @@ fn run() -> Result<(), String> {
     let timer_rx = timer::spawn_timer(state.quiz.frontmatter.end);
 
     // Run TUI
-    tui::run_tui(state, timer_rx, state_dir)?;
+    tui::run_tui(state, timer_rx)?;
 
     Ok(())
 }

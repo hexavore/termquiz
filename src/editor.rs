@@ -94,13 +94,13 @@ pub fn validate_file(
     Ok(())
 }
 
-pub fn copy_file_to_state(src: &str, state_dir: &Path, qnum: u32) -> Result<String, String> {
+pub fn copy_file_to_state(src: &str, repo_dir: &Path, qnum: u32) -> Result<String, String> {
     let src_path = Path::new(src);
     let filename = src_path
         .file_name()
         .ok_or_else(|| "Invalid file name".to_string())?;
 
-    let dest_dir = state_dir.join("files").join(format!("q{}", qnum));
+    let dest_dir = repo_dir.join("response").join("files").join(format!("q{}", qnum));
     fs::create_dir_all(&dest_dir)
         .map_err(|e| format!("Cannot create file dir: {}", e))?;
 

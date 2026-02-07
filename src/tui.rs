@@ -42,7 +42,6 @@ pub enum PushEvent {
 pub fn run_tui(
     mut state: AppState,
     timer_rx: mpsc::Receiver<TimerEvent>,
-    state_dir: std::path::PathBuf,
 ) -> Result<(), String> {
     enable_raw_mode().map_err(|e| format!("Cannot enable raw mode: {}", e))?;
     let mut stdout = io::stdout();
@@ -84,7 +83,6 @@ pub fn run_tui(
         &push_rx,
         &push_tx,
         &push_cancel,
-        &state_dir,
     );
 
     // Restore terminal
@@ -101,7 +99,6 @@ fn main_loop(
     push_rx: &mpsc::Receiver<PushEvent>,
     push_tx: &mpsc::Sender<PushEvent>,
     push_cancel: &Arc<AtomicBool>,
-    state_dir: &std::path::Path,
 ) -> Result<(), String> {
     loop {
         terminal
@@ -118,10 +115,10 @@ fn main_loop(
         {
             match event::read().map_err(|e| format!("Read error: {}", e))? {
                 Event::Key(key) => {
-                    handle_key(key, state, terminal, push_tx, push_cancel, state_dir)?;
+                    handle_key(key, state, terminal, push_tx, push_cancel)?;
                     // Auto-save after key handling
                     if state.screen == Screen::Working {
-                        let _ = persist::save_state(state, state_dir);
+                        let _ = persist::save_state(state);
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -130,7 +127,7 @@ fn main_loop(
                     handle_mouse(mouse, state, area)?;
                     // Auto-save after mouse handling
                     if state.screen == Screen::Working {
-                        let _ = persist::save_state(state, state_dir);
+                        let _ = persist::save_state(state);
                     }
                 }
                 _ => {}
@@ -139,12 +136,12 @@ fn main_loop(
 
         // Handle timer events
         while let Ok(ev) = timer_rx.try_recv() {
-            handle_timer(ev, state, push_tx, push_cancel, state_dir)?;
+            handle_timer(ev, state, push_tx, push_cancel)?;
         }
 
         // Handle push events
         while let Ok(ev) = push_rx.try_recv() {
-            handle_push(ev, state, state_dir)?;
+            handle_push(ev, state)?;
         }
     }
 
@@ -157,11 +154,10 @@ fn handle_key(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     push_tx: &mpsc::Sender<PushEvent>,
     push_cancel: &Arc<AtomicBool>,
-    state_dir: &std::path::Path,
 ) -> Result<(), String> {
     // Handle dialog keys first
     if state.has_dialog() {
-        return handle_dialog_key(key, state, terminal, push_tx, push_cancel, state_dir);
+        return handle_dialog_key(key, state, terminal, push_tx, push_cancel);
     }
 
     match state.screen {
@@ -169,7 +165,7 @@ fn handle_key(
         Screen::Preamble => handle_preamble_key(key, state),
         Screen::Acknowledgment => handle_ack_key(key, state),
         Screen::Working => {
-            handle_working_key(key, state, terminal, push_tx, push_cancel, state_dir)
+            handle_working_key(key, state, terminal, push_tx, push_cancel)
         }
         Screen::Closed | Screen::AlreadySubmitted | Screen::Done | Screen::SaveLocal => {
             if key.code == KeyCode::Enter {
@@ -317,7 +313,6 @@ fn handle_working_key(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     _push_tx: &mpsc::Sender<PushEvent>,
     _push_cancel: &Arc<AtomicBool>,
-    state_dir: &std::path::Path,
 ) -> Result<(), String> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -437,8 +432,8 @@ fn handle_working_key(
                                     // Validation error - could show in status
                                     return Ok(());
                                 }
-                                // Copy to state dir
-                                match editor::copy_file_to_state(&path, state_dir, q.number) {
+                                // Copy to response dir
+                                match editor::copy_file_to_state(&path, &state.repo_dir, q.number) {
                                     Ok(dest) => {
                                         state.add_file(q.number, dest);
                                     }
@@ -761,14 +756,13 @@ fn handle_dialog_key(
     _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     push_tx: &mpsc::Sender<PushEvent>,
     push_cancel: &Arc<AtomicBool>,
-    state_dir: &std::path::Path,
 ) -> Result<(), String> {
     let dialog = state.top_dialog().cloned();
     match dialog {
         Some(Dialog::ConfirmSubmit) => match key.code {
             KeyCode::Enter => {
                 state.pop_dialog();
-                do_submit(state, push_tx, push_cancel, state_dir)?;
+                do_submit(state, push_tx, push_cancel)?;
             }
             KeyCode::Esc => {
                 state.pop_dialog();
@@ -779,7 +773,7 @@ fn handle_dialog_key(
             KeyCode::Enter => {
                 state.pop_dialog();
                 state.save_current_text_input();
-                let _ = persist::save_state(state, state_dir);
+                let _ = persist::save_state(state);
                 state.should_quit = true;
             }
             KeyCode::Esc => {
@@ -833,7 +827,6 @@ fn handle_timer(
     state: &mut AppState,
     push_tx: &mpsc::Sender<PushEvent>,
     push_cancel: &Arc<AtomicBool>,
-    state_dir: &std::path::Path,
 ) -> Result<(), String> {
     match event {
         TimerEvent::Tick(secs) => {
@@ -854,7 +847,7 @@ fn handle_timer(
             state.remaining_seconds = Some(0);
             if state.screen == Screen::Working {
                 state.save_current_text_input();
-                do_submit(state, push_tx, push_cancel, state_dir)?;
+                do_submit(state, push_tx, push_cancel)?;
             }
         }
     }
@@ -864,13 +857,10 @@ fn handle_timer(
 fn handle_push(
     event: PushEvent,
     state: &mut AppState,
-    state_dir: &std::path::Path,
 ) -> Result<(), String> {
     match event {
         PushEvent::Success => {
             state.screen = Screen::Done;
-            // Clear local state
-            let _ = persist::clear_state(state_dir);
         }
         PushEvent::Retrying {
             attempt,
@@ -901,17 +891,16 @@ fn do_submit(
     state: &mut AppState,
     push_tx: &mpsc::Sender<PushEvent>,
     push_cancel: &Arc<AtomicBool>,
-    state_dir: &std::path::Path,
 ) -> Result<(), String> {
     state.submitted_at = Some(chrono::Utc::now().to_rfc3339());
     state.screen = Screen::Pushing;
 
-    // Build response
+    // Save state (writes response/answers.yaml)
+    let _ = persist::save_state(state);
+
+    // Copy file attachments
     let repo_dir = state.repo_dir.clone();
     submit::build_response(state, &repo_dir)?;
-
-    // Save state
-    let _ = persist::save_state(state, state_dir);
 
     // Git add + commit
     if git::is_git_repo(&repo_dir) {

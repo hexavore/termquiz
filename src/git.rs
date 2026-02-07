@@ -78,13 +78,13 @@ pub fn git_push(repo: &Path) -> Result<(), String> {
 }
 
 pub fn has_response_in_history(repo: &Path) -> bool {
-    run_git(&["log", "--all", "--format=%H", "--", "response/meta.toml"], repo)
+    run_git(&["log", "--all", "--format=%H", "--", "response/answers.yaml"], repo)
         .map(|out| !out.trim().is_empty())
         .unwrap_or(false)
 }
 
 pub fn has_response_in_worktree(repo: &Path) -> bool {
-    repo.join("response").join("meta.toml").exists()
+    repo.join("response").join("answers.yaml").exists()
 }
 
 pub fn has_existing_submission(repo: &Path) -> bool {

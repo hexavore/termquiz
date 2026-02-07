@@ -31,10 +31,10 @@ src/
   parser.rs        -- markdown + YAML frontmatter -> Quiz model
   model.rs         -- Quiz, Question, Choice, Answer, etc.
   state.rs         -- AppState, Screen enum, input handling
-  persist.rs       -- ~/.local/state/termquiz/<hash>/ persistence
+  persist.rs       -- save/load response/answers.yaml in repo dir
   timer.rs         -- background timer thread via mpsc
   git.rs           -- shell out to git CLI
-  submit.rs        -- build response/ dir, meta.toml, answers.toml
+  submit.rs        -- build answers.yaml, copy file attachments
   editor.rs        -- spawn $EDITOR, zenity file picker
   tui.rs           -- terminal init/restore, main event loop, mouse handling
   ui/
@@ -54,7 +54,7 @@ fixtures/
   mc_quiz.md       -- 25-question multiple choice only
 tests/
   parse_quiz.rs    -- parser tests (3 tests)
-  submit_format.rs -- submission format tests (2 tests)
+  submit_format.rs -- submission format tests (4 tests)
 ```
 
 ## Features Implemented
@@ -92,10 +92,11 @@ tests/
 - [x] Scroll wheel in main area (scroll content)
 
 ### State & Persistence
-- [x] Auto-save on every change (answers, done_marks, flags)
-- [x] Session restore on restart
-- [x] `--clear` to reset state
-- [x] `--export` to backup answers
+- [x] Single `response/answers.yaml` for all state (answers, session, done/flag marks)
+- [x] Auto-save on every change to `response/answers.yaml` in repo dir
+- [x] Session restore on restart (loads from `response/answers.yaml`)
+- [x] `--clear` to reset state (deletes `response/` directory)
+- [x] `--export` to backup answers (YAML format)
 
 ### Time Windows
 - [x] Waiting screen before start time
@@ -105,8 +106,7 @@ tests/
 
 ### Submission
 - [x] Build `response/` directory
-- [x] `meta.toml` with timestamps, acknowledgment, hints used
-- [x] `answers.toml` with all responses
+- [x] `answers.yaml` with quiz metadata, session state, and all per-question answers
 - [x] File copying to `response/files/qN/`
 - [x] Git add/commit/push
 - [x] Push retry with exponential backoff (2s→30s, 10min timeout)
@@ -171,7 +171,7 @@ cargo run -- --status ./fixtures/mc_quiz.md
 cargo run -- --clear ./fixtures/mc_quiz.md
 
 # Export answers
-cargo run -- --export answers.toml ./fixtures/mc_quiz.md
+cargo run -- --export answers.yaml ./fixtures/mc_quiz.md
 ```
 
 ## Tests
@@ -180,19 +180,20 @@ cargo run -- --export answers.toml ./fixtures/mc_quiz.md
 cargo test
 ```
 
-5 tests total:
+7 tests total:
 - `test_parse_sample_quiz` - full quiz parsing
 - `test_frontmatter_parsing` - YAML frontmatter
 - `test_preamble_parsing` - preamble extraction
-- `test_build_response` - submission directory creation
+- `test_build_response` - save state and verify YAML output
 - `test_commit_message` - commit message format
+- `test_yaml_structure` - YAML structure validation (all question types, done/flag, hints)
+- `test_save_and_load_roundtrip` - save/load cycle preserves all state
 
 ## Dependencies
 
 ```toml
 ratatui = "0.29"
 pulldown-cmark = "0.12"
-toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 sha2 = "0.10"
