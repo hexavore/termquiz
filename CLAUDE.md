@@ -41,9 +41,8 @@ src/
     mod.rs         -- top-level draw() dispatcher
     layout.rs      -- frame layout (30-char sidebar + main)
     titlebar.rs    -- title + countdown (yellow bold, red bg when urgent)
-    sidebar.rs     -- question list: icon + number + title
-    question.rs    -- question content + answer input widgets
-    statusbar.rs   -- totals per status
+    sidebar.rs     -- question list: icon + number + title + status counts
+    question.rs    -- question content + answer input widgets + Done/Flag buttons
     keybar.rs      -- key binding hints
     dialog.rs      -- confirmation dialogs, help overlay
     waiting.rs     -- waiting/closed screens
@@ -70,24 +69,30 @@ tests/
 
 ### TUI
 - [x] Sidebar with status icons (·○◐✓⚑), question numbers, titles
+- [x] Sidebar title shows filtered/total count ("13 of 25 Questions")
+- [x] Sidebar status counts (vertical, aligned, below separator line)
 - [x] Question rendering with markdown styling
 - [x] Single choice (radio buttons)
 - [x] Multi choice (checkboxes)
 - [x] Short answer (inline text input)
 - [x] Long answer ($EDITOR integration)
 - [x] File attachment (zenity picker)
-- [x] Countdown timer (yellow bold, red background when ≤2min)
-- [x] Status bar with counts
+- [x] Countdown timer (yellow bold, red background when ≤2min, leading zeroes)
+- [x] Done/Flag buttons with underlined hotkey letters (Ctrl+N / Ctrl+F)
+- [x] Tab focus cycling: Answer → Hint → Done → Flag (with ▸ indicator)
+- [x] Space activates focused hint/button
+- [x] Live text status: typing updates sidebar in real-time; empty text clears Done
 - [x] Context-sensitive key bar
 
 ### Mouse Support
 - [x] Click sidebar to navigate questions
-- [x] Click choices to select/toggle
+- [x] Click choices to select/toggle (hit-map based, accounts for wrapping)
+- [x] Click Done/Flag buttons (Y-coordinate validated)
 - [x] Scroll wheel in sidebar (navigate questions)
 - [x] Scroll wheel in main area (scroll content)
 
 ### State & Persistence
-- [x] Auto-save on every change
+- [x] Auto-save on every change (answers, done_marks, flags)
 - [x] Session restore on restart
 - [x] `--clear` to reset state
 - [x] `--export` to backup answers
@@ -109,12 +114,25 @@ tests/
 - [x] Local save fallback with manual instructions
 
 ### Dialogs
-- [x] Confirm submit (shows empty/flagged counts)
+- [x] Confirm submit (shows not-answered/flagged counts)
 - [x] Confirm quit
 - [x] Confirm hint reveal
-- [x] Confirm file delete
+- [x] Done requires answer (note, dismissed by any key)
 - [x] 2-minute warning
 - [x] Help overlay (full key reference)
+
+### Question Status Model
+
+| Status | Icon | Color | Condition |
+|--------|------|-------|-----------|
+| Done | ✓ | Green (bold) | Explicitly marked done (Ctrl+N) |
+| Flagged | ⚑ | Red | Explicitly flagged (Ctrl+F) |
+| Answered | ◐ | LightBlue | Has any answer content |
+| Not Answered | ○ | White | Visited but no answer |
+| Unread | · | DarkGray | Never visited |
+
+**Priority:** Done > Flagged > Answered > Not Answered > Unread
+**Rules:** Done and Flagged are mutually exclusive. Done requires an answer. Emptying a Short/Long text field automatically clears Done.
 
 ## Key Bindings
 
@@ -122,15 +140,18 @@ tests/
 |-----|--------|
 | ↑/↓ | Navigate choices / scroll |
 | ←/→ | Previous/next question |
+| Ctrl+↑/← | Previous question (works in text input) |
+| Ctrl+↓/→ | Next question (works in text input) |
 | PgUp/PgDn | Jump 5 questions |
 | Home/End | First/last question |
 | Enter | Confirm selection |
-| Space | Toggle multi-choice |
+| Tab | Cycle focus: Answer → Hint → Done → Flag |
+| Space | Toggle multi-choice / activate focused button |
+| Ctrl+N | Toggle done mark |
 | Ctrl+H | Reveal hint |
 | Ctrl+F | Toggle flag |
 | Ctrl+E | Open editor (long answer) |
 | Ctrl+A | Attach file |
-| Ctrl+D | Delete attachment |
 | Ctrl+S | Submit |
 | Ctrl+Q | Quit |
 | ? | Help |
@@ -184,6 +205,5 @@ No tokio, no git2, no separate crossterm (uses ratatui re-export).
 
 ## Known Limitations
 
-- Mouse click detection for choices is approximate (based on estimated line positions)
 - No TUI fallback for file path input when zenity unavailable
 - Single `.md` file per directory required (or specify path explicitly)

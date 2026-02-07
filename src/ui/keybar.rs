@@ -4,41 +4,67 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::state::{AppState, InputMode};
+use crate::model::QuestionKind;
+use crate::state::{AppState, InputMode, MainFocus};
 
 pub fn draw_keybar(f: &mut Frame, area: Rect, state: &AppState) {
-    let bindings: Vec<(&str, &str)> = match state.input_mode {
-        InputMode::TextInput => vec![
-            ("←/→", "cursor"),
-            ("Esc", "done editing"),
-            ("Tab", "panel"),
+    let is_long = state
+        .current_question()
+        .map_or(false, |q| matches!(q.kind, QuestionKind::Long));
+
+    let bindings: Vec<(&str, &str)> = if state.main_focus != MainFocus::Answer
+        && state.input_mode != InputMode::AckNameInput
+    {
+        vec![
+            ("Tab", "next"),
+            ("Space", "press"),
             ("Ctrl+S", "submit"),
             ("Ctrl+Q", "quit"),
-        ],
-        InputMode::ChoiceSelect => vec![
-            ("a-z", "answer"),
-            ("arrows", "prev/next"),
-            ("PgUp/PgDn", "jump 5"),
-            ("Tab", "panel"),
-            ("Ctrl+N", "done"),
-            ("Ctrl+F", "flag"),
-            ("Ctrl+S", "submit"),
-            ("Ctrl+Q", "quit"),
-        ],
-        InputMode::Navigation => vec![
-            ("arrows", "prev/next"),
-            ("PgUp/PgDn", "jump 5"),
-            ("Tab", "panel"),
-            ("Ctrl+N", "done"),
-            ("Ctrl+F", "flag"),
-            ("Ctrl+S", "submit"),
-            ("Ctrl+Q", "quit"),
-        ],
-        InputMode::AckNameInput => vec![
-            ("Tab", "next field"),
-            ("Enter", "confirm"),
-            ("Esc", "cancel"),
-        ],
+        ]
+    } else {
+        match state.input_mode {
+            InputMode::TextInput if is_long => vec![
+                ("↑/↓", "move line"),
+                ("Ctrl+←/→", "prev/next Q"),
+                ("Esc", "done editing"),
+                ("Ctrl+E", "ext. editor"),
+                ("Tab", "next"),
+                ("Ctrl+S", "submit"),
+                ("Ctrl+Q", "quit"),
+            ],
+            InputMode::TextInput => vec![
+                ("←/→", "cursor"),
+                ("Ctrl+←/→", "prev/next Q"),
+                ("Esc", "done editing"),
+                ("Tab", "next"),
+                ("Ctrl+S", "submit"),
+                ("Ctrl+Q", "quit"),
+            ],
+            InputMode::ChoiceSelect => vec![
+                ("a-z", "answer"),
+                ("arrows", "prev/next"),
+                ("PgUp/PgDn", "jump 5"),
+                ("Tab", "next"),
+                ("Ctrl+N", "done"),
+                ("Ctrl+F", "flag"),
+                ("Ctrl+S", "submit"),
+                ("Ctrl+Q", "quit"),
+            ],
+            InputMode::Navigation => vec![
+                ("arrows", "prev/next"),
+                ("PgUp/PgDn", "jump 5"),
+                ("Tab", "next"),
+                ("Ctrl+N", "done"),
+                ("Ctrl+F", "flag"),
+                ("Ctrl+S", "submit"),
+                ("Ctrl+Q", "quit"),
+            ],
+            InputMode::AckNameInput => vec![
+                ("Tab", "next field"),
+                ("Enter", "confirm"),
+                ("Esc", "cancel"),
+            ],
+        }
     };
 
     let mut spans: Vec<Span> = vec![Span::raw(" ")];

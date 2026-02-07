@@ -48,6 +48,14 @@ pub enum ActivePanel {
     Main,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum MainFocus {
+    Answer,
+    Hint,
+    DoneButton,
+    FlagButton,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub screen: Screen,
@@ -79,8 +87,10 @@ pub struct AppState {
     pub question_scroll: usize,
     pub file_cursor: usize,
     pub active_panel: ActivePanel,
+    pub main_focus: MainFocus,
     pub dragging_scrollbar: bool,
     pub done_marks: HashMap<u32, bool>,
+    pub status_filter: [bool; 5],
 }
 
 impl AppState {
@@ -115,8 +125,10 @@ impl AppState {
             question_scroll: 0,
             file_cursor: 0,
             active_panel: ActivePanel::Main,
+            main_focus: MainFocus::Answer,
             dragging_scrollbar: false,
             done_marks: HashMap::new(),
+            status_filter: [true; 5],
         }
     }
 
@@ -131,13 +143,24 @@ impl AppState {
     }
 
     pub fn question_status(&self, qnum: u32) -> QuestionStatus {
-        if self.done_marks.get(&qnum).copied().unwrap_or(false) {
+        // For the current Short/Long question, use live text_input length
+        let is_current_text = self.current_question()
+            .filter(|q| q.number == qnum)
+            .map_or(false, |q| matches!(q.kind, QuestionKind::Short | QuestionKind::Long));
+        let current_text_empty = is_current_text && self.text_input.is_empty();
+
+        // Done is invalid when the current text field is empty
+        if !current_text_empty && self.done_marks.get(&qnum).copied().unwrap_or(false) {
             return QuestionStatus::Done;
         }
         if self.flags.get(&qnum).copied().unwrap_or(false) {
             return QuestionStatus::Flagged;
         }
-        if self.answers.contains_key(&qnum) {
+        if is_current_text {
+            if !self.text_input.is_empty() {
+                return QuestionStatus::Answered;
+            }
+        } else if self.answers.contains_key(&qnum) {
             return QuestionStatus::Answered;
         }
         if self.visited.get(&qnum).copied().unwrap_or(false) {
@@ -168,9 +191,21 @@ impl AppState {
             self.done_marks.insert(qnum, false);
             true
         } else {
-            if !self.answers.contains_key(&qnum) {
+            // For current Short/Long, check live text_input instead of answers map
+            let has_answer = {
+                let is_current_text = self.current_question()
+                    .map_or(false, |q| matches!(q.kind, QuestionKind::Short | QuestionKind::Long));
+                if is_current_text {
+                    !self.text_input.is_empty()
+                } else {
+                    self.answers.contains_key(&qnum)
+                }
+            };
+            if !has_answer {
                 return false;
             }
+            // Save text so the answer is persisted before marking done
+            self.save_current_text_input();
             self.done_marks.insert(qnum, true);
             // Mutually exclusive: clear flag
             self.flags.insert(qnum, false);
@@ -191,11 +226,48 @@ impl AppState {
     }
 
     pub fn is_done(&self, qnum: u32) -> bool {
-        self.done_marks.get(&qnum).copied().unwrap_or(false)
+        if !self.done_marks.get(&qnum).copied().unwrap_or(false) {
+            return false;
+        }
+        // For the current Short/Long question, done is invalid when text is empty
+        let is_current_text = self.current_question()
+            .filter(|q| q.number == qnum)
+            .map_or(false, |q| matches!(q.kind, QuestionKind::Short | QuestionKind::Long));
+        if is_current_text && self.text_input.is_empty() {
+            return false;
+        }
+        true
     }
 
     pub fn is_flagged(&self, qnum: u32) -> bool {
         self.flags.get(&qnum).copied().unwrap_or(false)
+    }
+
+    pub fn is_status_visible(&self, status: QuestionStatus) -> bool {
+        match status {
+            QuestionStatus::Done => self.status_filter[0],
+            QuestionStatus::Answered => self.status_filter[1],
+            QuestionStatus::Flagged => self.status_filter[2],
+            QuestionStatus::NotAnswered => self.status_filter[3],
+            QuestionStatus::Unread => self.status_filter[4],
+        }
+    }
+
+    pub fn toggle_status_filter(&mut self, idx: usize) {
+        if idx < 5 {
+            self.status_filter[idx] = !self.status_filter[idx];
+        }
+    }
+
+    /// Returns indices into quiz.questions for questions whose status passes the filter.
+    pub fn filtered_questions(&self) -> Vec<usize> {
+        self.quiz
+            .questions
+            .iter()
+            .enumerate()
+            .filter(|(_, q)| self.is_status_visible(self.question_status(q.number)))
+            .map(|(i, _)| i)
+            .collect()
     }
 
     pub fn navigate_to(&mut self, idx: usize) {
@@ -210,8 +282,38 @@ impl AppState {
             self.choice_cursor = 0;
             self.question_scroll = 0;
             self.file_cursor = 0;
+            self.main_focus = MainFocus::Answer;
             self.update_input_mode();
         }
+    }
+
+    pub fn cycle_main_focus(&mut self) {
+        let has_unrevealed_hints = self.current_question().map_or(false, |q| {
+            let qnum = q.number;
+            let revealed = self.hints_revealed.get(&qnum).copied().unwrap_or(0);
+            q.hints.len() > 0 && revealed < q.hints.len()
+        });
+
+        self.main_focus = match self.main_focus {
+            MainFocus::Answer => {
+                // Leaving Answer: save text input, switch to Navigation
+                self.save_current_text_input();
+                self.input_mode = InputMode::Navigation;
+                if has_unrevealed_hints {
+                    MainFocus::Hint
+                } else {
+                    MainFocus::DoneButton
+                }
+            }
+            MainFocus::Hint => MainFocus::DoneButton,
+            MainFocus::DoneButton => MainFocus::FlagButton,
+            MainFocus::FlagButton => {
+                // Entering Answer: restore appropriate input mode
+                let focus = MainFocus::Answer;
+                self.update_input_mode();
+                focus
+            }
+        };
     }
 
     pub fn save_current_text_input(&mut self) {
@@ -228,6 +330,9 @@ impl AppState {
                                 files: None,
                             },
                         );
+                    } else {
+                        self.answers.remove(&q.number);
+                        self.done_marks.insert(q.number, false);
                     }
                 }
                 QuestionKind::Long => {
@@ -241,6 +346,9 @@ impl AppState {
                                 files: None,
                             },
                         );
+                    } else {
+                        self.answers.remove(&q.number);
+                        self.done_marks.insert(q.number, false);
                     }
                 }
                 _ => {}
@@ -272,7 +380,10 @@ impl AppState {
                 QuestionKind::Short => {
                     self.input_mode = InputMode::TextInput;
                 }
-                QuestionKind::Long | QuestionKind::File(_) => {
+                QuestionKind::Long => {
+                    self.input_mode = InputMode::TextInput;
+                }
+                QuestionKind::File(_) => {
                     self.input_mode = InputMode::Navigation;
                 }
             }

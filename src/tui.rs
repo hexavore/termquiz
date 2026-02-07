@@ -64,7 +64,7 @@ pub fn run_tui(
                 QuestionKind::SingleChoice(_) | QuestionKind::MultiChoice(_) => {
                     state.input_mode = InputMode::ChoiceSelect;
                 }
-                QuestionKind::Short => {
+                QuestionKind::Short | QuestionKind::Long => {
                     state.input_mode = InputMode::TextInput;
                 }
                 _ => {
@@ -343,6 +343,16 @@ fn handle_working_key(
                 state.toggle_flag();
                 return Ok(());
             }
+            KeyCode::Up | KeyCode::Left => {
+                state.save_current_text_input();
+                navigate_prev(state);
+                return Ok(());
+            }
+            KeyCode::Down | KeyCode::Right => {
+                state.save_current_text_input();
+                navigate_next(state);
+                return Ok(());
+            }
             KeyCode::Char('h') => {
                 let qnum = state.current_question_number();
                 if let Some(q) = state.current_question() {
@@ -379,6 +389,7 @@ fn handle_working_key(
                                         files: None,
                                     },
                                 );
+                                state.load_text_input_for_current();
                             }
                             Err(_e) => {
                                 // Editor failed, keep old content
@@ -449,12 +460,34 @@ fn handle_working_key(
         }
     }
 
-    // Tab toggles panel focus
+    // Tab cycles focus within the main panel
     if key.code == KeyCode::Tab {
-        state.active_panel = match state.active_panel {
-            ActivePanel::Sidebar => ActivePanel::Main,
-            ActivePanel::Main => ActivePanel::Sidebar,
-        };
+        state.cycle_main_focus();
+        return Ok(());
+    }
+
+    // Space activates focused hint/button (when not on Answer)
+    if key.code == KeyCode::Char(' ') && !ctrl && state.main_focus != MainFocus::Answer {
+        match state.main_focus {
+            MainFocus::Hint => {
+                let qnum = state.current_question_number();
+                if let Some(q) = state.current_question() {
+                    let revealed = state.hints_revealed.get(&qnum).copied().unwrap_or(0);
+                    if revealed < q.hints.len() {
+                        state.push_dialog(Dialog::ConfirmHint);
+                    }
+                }
+            }
+            MainFocus::DoneButton => {
+                if !state.toggle_done() {
+                    state.push_dialog(Dialog::DoneRequiresAnswer);
+                }
+            }
+            MainFocus::FlagButton => {
+                state.toggle_flag();
+            }
+            MainFocus::Answer => {}
+        }
         return Ok(());
     }
 
@@ -468,6 +501,10 @@ fn handle_working_key(
 }
 
 fn handle_text_input_key(key: KeyEvent, state: &mut AppState) -> Result<(), String> {
+    let is_long = state
+        .current_question()
+        .map_or(false, |q| matches!(q.kind, QuestionKind::Long));
+
     match key.code {
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             state.text_input.insert(state.text_cursor, c);
@@ -484,37 +521,115 @@ fn handle_text_input_key(key: KeyEvent, state: &mut AppState) -> Result<(), Stri
                 state.text_input.remove(state.text_cursor);
             }
         }
-        KeyCode::Left if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Left => {
             if state.text_cursor > 0 {
                 state.text_cursor -= 1;
             }
         }
-        KeyCode::Right if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Right => {
             if state.text_cursor < state.text_input.len() {
                 state.text_cursor += 1;
             }
         }
+        KeyCode::Enter => {
+            if is_long {
+                state.text_input.insert(state.text_cursor, '\n');
+                state.text_cursor += 1;
+            } else {
+                state.save_current_text_input();
+                navigate_next(state);
+            }
+        }
+        KeyCode::Up => {
+            if is_long {
+                move_cursor_up(state);
+            } else {
+                state.save_current_text_input();
+                navigate_prev(state);
+            }
+        }
+        KeyCode::Down => {
+            if is_long {
+                move_cursor_down(state);
+            } else {
+                state.save_current_text_input();
+                navigate_next(state);
+            }
+        }
         KeyCode::Home => {
-            state.text_cursor = 0;
+            if is_long {
+                let before = &state.text_input[..state.text_cursor];
+                let line_start = before.rfind('\n').map_or(0, |p| p + 1);
+                state.text_cursor = line_start;
+            } else {
+                state.text_cursor = 0;
+            }
         }
         KeyCode::End => {
-            state.text_cursor = state.text_input.len();
+            if is_long {
+                let after = &state.text_input[state.text_cursor..];
+                let line_end = after
+                    .find('\n')
+                    .map_or(state.text_input.len(), |p| state.text_cursor + p);
+                state.text_cursor = line_end;
+            } else {
+                state.text_cursor = state.text_input.len();
+            }
         }
         KeyCode::Esc => {
             state.save_current_text_input();
             state.input_mode = InputMode::Navigation;
         }
-        KeyCode::Up => {
-            state.save_current_text_input();
-            navigate_prev(state);
-        }
-        KeyCode::Down => {
-            state.save_current_text_input();
-            navigate_next(state);
-        }
         _ => {}
     }
+    // If text was emptied, clear done mark immediately
+    if state.text_input.is_empty() {
+        let qnum = state.current_question_number();
+        if state.done_marks.get(&qnum).copied().unwrap_or(false) {
+            state.done_marks.insert(qnum, false);
+        }
+    }
     Ok(())
+}
+
+fn cursor_row_col(text: &str, cursor: usize) -> (usize, usize) {
+    let pos = cursor.min(text.len());
+    let before = &text[..pos];
+    let row = before.matches('\n').count();
+    let col = before.rfind('\n').map_or(pos, |p| pos - p - 1);
+    (row, col)
+}
+
+fn move_cursor_up(state: &mut AppState) {
+    let (row, col) = cursor_row_col(&state.text_input, state.text_cursor);
+    if row == 0 {
+        return;
+    }
+    let lines: Vec<&str> = state.text_input.split('\n').collect();
+    let target_row = row - 1;
+    let target_col = col.min(lines[target_row].len());
+    let mut offset = 0;
+    for i in 0..target_row {
+        offset += lines[i].len() + 1;
+    }
+    offset += target_col;
+    state.text_cursor = offset;
+}
+
+fn move_cursor_down(state: &mut AppState) {
+    let (row, col) = cursor_row_col(&state.text_input, state.text_cursor);
+    let lines: Vec<&str> = state.text_input.split('\n').collect();
+    if row + 1 >= lines.len() {
+        return;
+    }
+    let target_row = row + 1;
+    let target_col = col.min(lines[target_row].len());
+    let mut offset = 0;
+    for i in 0..target_row {
+        offset += lines[i].len() + 1;
+    }
+    offset += target_col;
+    state.text_cursor = offset;
 }
 
 fn handle_choice_key(key: KeyEvent, state: &mut AppState) -> Result<(), String> {
@@ -569,6 +684,28 @@ fn handle_choice_key(key: KeyEvent, state: &mut AppState) -> Result<(), String> 
 }
 
 fn handle_nav_key(key: KeyEvent, state: &mut AppState) -> Result<(), String> {
+    // Enter or typing a character resumes editing for text questions
+    let is_text_question = state.current_question().map_or(false, |q| {
+        matches!(q.kind, QuestionKind::Short | QuestionKind::Long)
+    });
+    if is_text_question {
+        match key.code {
+            KeyCode::Enter => {
+                state.input_mode = InputMode::TextInput;
+                return Ok(());
+            }
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL) && c != '?' =>
+            {
+                state.input_mode = InputMode::TextInput;
+                state.text_input.insert(state.text_cursor, c);
+                state.text_cursor += 1;
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
         KeyCode::Up | KeyCode::Left => navigate_prev(state),
         KeyCode::Down | KeyCode::Right => navigate_next(state),
@@ -656,6 +793,15 @@ fn handle_dialog_key(
                 let qnum = state.current_question_number();
                 let current = state.hints_revealed.get(&qnum).copied().unwrap_or(0);
                 state.hints_revealed.insert(qnum, current + 1);
+                // If all hints now revealed and focus is on Hint, advance to DoneButton
+                if state.main_focus == MainFocus::Hint {
+                    let all_revealed = state.current_question().map_or(true, |q| {
+                        current + 1 >= q.hints.len()
+                    });
+                    if all_revealed {
+                        state.main_focus = MainFocus::DoneButton;
+                    }
+                }
             }
             KeyCode::Esc => {
                 state.pop_dialog();
@@ -888,20 +1034,42 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, size: Rect) -> Result<(
                 state.dragging_scrollbar = false;
                 let relative_y = y.saturating_sub(layout.sidebar.y + 1) as usize;
                 let visible_height = layout.sidebar.height.saturating_sub(2) as usize;
-                let current = state.current_question;
+                let question_height = visible_height.saturating_sub(6); // 1 separator + 5 status
+                let status_start = question_height + 1; // after separator
 
-                let scroll_offset = if current >= state.sidebar_scroll + visible_height {
-                    current.saturating_sub(visible_height - 1)
-                } else if current < state.sidebar_scroll {
-                    current
-                } else {
-                    state.sidebar_scroll
-                };
+                if relative_y >= status_start && relative_y < status_start + 5 {
+                    // Click in status area — check if on checkbox column
+                    let inner_width = layout.sidebar.width.saturating_sub(1) as usize;
+                    let rel_x = x.saturating_sub(layout.sidebar.x) as usize;
+                    // Checkbox occupies the last 3 chars of inner_width
+                    if rel_x >= inner_width.saturating_sub(3) && rel_x < inner_width {
+                        let status_idx = relative_y - status_start;
+                        state.toggle_status_filter(status_idx);
+                    }
+                } else if relative_y < question_height {
+                    // Click on question list — use filtered list
+                    let filtered = state.filtered_questions();
+                    let current = state.current_question;
+                    let current_filtered_pos = filtered.iter().position(|&i| i == current);
 
-                let clicked_idx = scroll_offset + relative_y;
-                if clicked_idx < state.quiz.questions.len() {
-                    state.navigate_to(clicked_idx);
-                    state.active_panel = ActivePanel::Main;
+                    let scroll_offset = if let Some(pos) = current_filtered_pos {
+                        if pos >= state.sidebar_scroll + question_height {
+                            pos.saturating_sub(question_height - 1)
+                        } else if pos < state.sidebar_scroll {
+                            pos
+                        } else {
+                            state.sidebar_scroll
+                        }
+                    } else {
+                        state.sidebar_scroll.min(filtered.len().saturating_sub(question_height))
+                    };
+
+                    let filtered_click = scroll_offset + relative_y;
+                    if filtered_click < filtered.len() {
+                        let actual_idx = filtered[filtered_click];
+                        state.navigate_to(actual_idx);
+                        state.active_panel = ActivePanel::Main;
+                    }
                 }
             }
             // Click in main area (for choice selection and buttons)
@@ -915,7 +1083,7 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, size: Rect) -> Result<(
                 let visible_y = y.saturating_sub(layout.main.y) as usize;
                 let content_line = visible_y + state.question_scroll;
 
-                if let Some(hit_map) = crate::ui::question::compute_hit_map(state, layout.main.width) {
+                if let Some(hit_map) = crate::ui::question::compute_hit_map(state, layout.main) {
                     if content_line == hit_map.button_line {
                         // Done button: columns 2..10, Flag button: columns 12..20
                         if (2..10).contains(&rel_x) {
