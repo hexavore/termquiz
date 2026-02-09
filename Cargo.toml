@@ -2,6 +2,13 @@
 name = "termquiz"
 version = "0.1.0"
 edition = "2021"
+description = "Terminal-based timed quiz application"
+license = "MIT"
+
+[package.metadata.deb]
+depends = "sleuthkit, libsdl2-2.0-0"
+section = "education"
+priority = "optional"
 
 [dependencies]
 ratatui = "0.29"
